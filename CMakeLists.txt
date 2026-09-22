@@ -68,6 +68,11 @@ target_include_directories(dh_chunk_manager PUBLIC include)
 target_link_libraries(dh_chunk_manager PRIVATE dh_chunk)
 dh_set_warnings(dh_chunk_manager)
 
+add_library(dh_img_dump STATIC src/img_dump.cpp)
+target_include_directories(dh_img_dump PUBLIC include)
+target_link_libraries(dh_img_dump PRIVATE dh_chunk)
+dh_set_warnings(dh_img_dump)
+
 # --- tests ---
 enable_testing()
 
@@ -100,3 +105,7 @@ add_executable(dh_chunk_manager_tests tests/chunk_manager_test.cpp)
 target_link_libraries(dh_chunk_manager_tests PRIVATE dh_chunk_manager Catch2::Catch2WithMain)
 dh_set_warnings(dh_chunk_manager_tests)
 add_test(NAME chunk_manager COMMAND dh_chunk_manager_tests)
+
+add_executable(dh_dump src/dump_main.cpp)
+target_link_libraries(dh_dump PRIVATE dh_img_dump)
+dh_set_warnings(dh_dump)
