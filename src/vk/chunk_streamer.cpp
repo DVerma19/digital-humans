@@ -16,10 +16,10 @@ inline int32_t cheb(coords::ChunkAddress a, coords::ChunkAddress b) {
 
 ChunkStreamer::ChunkStreamer(VkDevice device, VkPhysicalDevice phys,
                              uint64_t world_seed, uint16_t generation_version,
-                             int32_t radius)
+                             int32_t radius, const dh::hydro::BasinGrid* basin)
     : device_(device), phys_(phys),
       seed_(world_seed), version_(generation_version),
-      radius_(radius) {}
+      radius_(radius), basin_(basin) {}
 
 ChunkStreamer::~ChunkStreamer() {
     for (auto& kv : loaded_) destroy_render_chunk(device_, kv.second);
@@ -34,7 +34,6 @@ void ChunkStreamer::update(float cam_x, float cam_y, float cam_z, int max_builds
         pending_dirty_ = true;
     }
 
-    // Evict far chunks first so their memory is available.
     const int32_t evict_r = radius_ + 2;
     for (auto it = loaded_.begin(); it != loaded_.end(); ) {
         if (cheb(it->first, center_) > evict_r) {
@@ -72,7 +71,7 @@ void ChunkStreamer::update(float cam_x, float cam_y, float cam_z, int max_builds
             it = pending_.erase(it);
             continue;
         }
-        loaded_.emplace(a, create_render_chunk(device_, phys_, a, seed_, version_));
+        loaded_.emplace(a, create_render_chunk(device_, phys_, a, seed_, version_, basin_));
         it = pending_.erase(it);
         ++built;
     }

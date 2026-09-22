@@ -8,6 +8,7 @@
 #include "dh/vk/camera.hpp"
 #include "dh/vk/chunk_streamer.hpp"
 #include "dh/chunk.hpp"
+#include "dh/hydro.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -57,9 +58,10 @@ struct Renderer {
     VkSemaphore     image_ready = VK_NULL_HANDLE;
     VkFence         in_flight   = VK_NULL_HANDLE;
 
-    dh::vk::Camera            camera;
-    dh::vk::Mat4              mvp;
-    dh::vk::ChunkStreamer*    streamer = nullptr;
+    dh::vk::Camera                camera;
+    dh::vk::Mat4                  mvp;
+    dh::vk::ChunkStreamer*        streamer = nullptr;
+    dh::hydro::BasinGrid*         basin    = nullptr;
 
     float mouse_accum_x = 0.0f;
     float mouse_accum_y = 0.0f;
@@ -196,21 +198,27 @@ void create_pipeline(Renderer& r) {
 
     VkVertexInputBindingDescription bind{};
     bind.binding   = 0;
-    bind.stride    = 6 * sizeof(float);
+    bind.stride    = 8 * sizeof(float);
     bind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription attrs[2]{};
+    VkVertexInputAttributeDescription attrs[4]{};
     attrs[0].location = 0; attrs[0].binding = 0;
     attrs[0].format = VK_FORMAT_R32G32B32_SFLOAT; attrs[0].offset = 0;
     attrs[1].location = 1; attrs[1].binding = 0;
     attrs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
     attrs[1].offset = 3 * sizeof(float);
+    attrs[2].location = 2; attrs[2].binding = 0;
+    attrs[2].format = VK_FORMAT_R32_SFLOAT;
+    attrs[2].offset = 6 * sizeof(float);
+    attrs[3].location = 3; attrs[3].binding = 0;
+    attrs[3].format = VK_FORMAT_R32_SFLOAT;
+    attrs[3].offset = 7 * sizeof(float);
 
     VkPipelineVertexInputStateCreateInfo vi{};
     vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vi.vertexBindingDescriptionCount   = 1;
     vi.pVertexBindingDescriptions      = &bind;
-    vi.vertexAttributeDescriptionCount = 2;
+    vi.vertexAttributeDescriptionCount = 4;
     vi.pVertexAttributeDescriptions    = attrs;
 
     VkPipelineInputAssemblyStateCreateInfo ia{};
@@ -343,8 +351,13 @@ void init_vulkan(Renderer& r, uint64_t seed, uint16_t version) {
     create_swapchain(r);
     create_pipeline(r);
 
+    std::fprintf(stderr, "computing basin grid...\n");
+    r.basin = new dh::hydro::BasinGrid(
+        dh::hydro::compute_basin_grid(seed, version));
+    std::fprintf(stderr, "basin grid ready.\n");
+
     r.streamer = new dh::vk::ChunkStreamer(r.device, r.physical, seed, version,
-                                           kStreamRadius);
+                                           kStreamRadius, r.basin);
 
     // Initial camera: standing on the terrain at chunk (0,0) center.
     const float cam_y = dh::chunk::elevation_at({0, 0}, 32, 32, seed, version) + 30.0f;
@@ -506,6 +519,8 @@ void shutdown(Renderer& r) {
 
     delete r.streamer;
     r.streamer = nullptr;
+    delete r.basin;
+    r.basin = nullptr;
 
     vkDestroyPipeline(r.device, r.pipeline, nullptr);
     vkDestroyPipelineLayout(r.device, r.pipeline_layout, nullptr);

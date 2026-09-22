@@ -127,14 +127,14 @@ dh_set_warnings(dh_vk_buffer)
 add_library(dh_vk_render_chunk STATIC src/vk/render_chunk.cpp)
 target_include_directories(dh_vk_render_chunk PUBLIC include)
 target_link_libraries(dh_vk_render_chunk PUBLIC
-    Vulkan::Vulkan dh_vk_buffer dh_chunk dh_coords)
+    Vulkan::Vulkan dh_vk_buffer dh_chunk dh_coords dh_hydro)
 target_include_directories(dh_vk_render_chunk SYSTEM PRIVATE ${Vulkan_INCLUDE_DIRS})
 dh_set_warnings(dh_vk_render_chunk)
 
 add_library(dh_vk_streamer STATIC src/vk/chunk_streamer.cpp)
 target_include_directories(dh_vk_streamer PUBLIC include)
 target_link_libraries(dh_vk_streamer PUBLIC
-    Vulkan::Vulkan dh_vk_render_chunk dh_coords)
+    Vulkan::Vulkan dh_vk_render_chunk dh_coords dh_hydro)
 target_include_directories(dh_vk_streamer SYSTEM PRIVATE ${Vulkan_INCLUDE_DIRS})
 dh_set_warnings(dh_vk_streamer)
 
@@ -235,6 +235,7 @@ target_link_libraries(dh_vk_terrain PRIVATE
     dh_vk_streamer
     dh_chunk
     dh_coords
+    dh_hydro
 )
 target_include_directories(dh_vk_terrain SYSTEM PRIVATE ${vk-bootstrap_SOURCE_DIR}/src)
 target_compile_definitions(dh_vk_terrain PRIVATE DH_SHADER_DIR="${DH_SHADER_BIN_DIR}")

@@ -5,6 +5,7 @@
 #include <vulkan/vulkan.h>
 #include "dh/coords.hpp"
 #include "dh/vk/render_chunk.hpp"
+#include "dh/hydro.hpp"
 
 namespace dh::vk {
 
@@ -20,7 +21,7 @@ class ChunkStreamer {
 public:
     ChunkStreamer(VkDevice device, VkPhysicalDevice phys,
                   uint64_t world_seed, uint16_t generation_version,
-                  int32_t radius);
+                  int32_t radius, const dh::hydro::BasinGrid* basin);
     ~ChunkStreamer();
 
     ChunkStreamer(const ChunkStreamer&) = delete;
@@ -36,11 +37,12 @@ public:
     int32_t radius() const { return radius_; }
 
 private:
-    VkDevice          device_;
-    VkPhysicalDevice  phys_;
-    uint64_t          seed_;
-    uint16_t          version_;
-    int32_t           radius_;
+    VkDevice                 device_;
+    VkPhysicalDevice         phys_;
+    uint64_t                 seed_;
+    uint16_t                 version_;
+    int32_t                  radius_;
+    const dh::hydro::BasinGrid* basin_;
 
     coords::ChunkAddress center_{0, 0};
     bool                 have_center_ = false;
