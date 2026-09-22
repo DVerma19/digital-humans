@@ -105,6 +105,26 @@ target_include_directories(dh_vk_camera PUBLIC include)
 target_link_libraries(dh_vk_camera PUBLIC dh_vk_math)
 dh_set_warnings(dh_vk_camera)
 
+add_library(dh_vk_buffer STATIC src/vk/buffer.cpp)
+target_include_directories(dh_vk_buffer PUBLIC include)
+target_link_libraries(dh_vk_buffer PUBLIC Vulkan::Vulkan)
+target_include_directories(dh_vk_buffer SYSTEM PRIVATE ${Vulkan_INCLUDE_DIRS})
+dh_set_warnings(dh_vk_buffer)
+
+add_library(dh_vk_render_chunk STATIC src/vk/render_chunk.cpp)
+target_include_directories(dh_vk_render_chunk PUBLIC include)
+target_link_libraries(dh_vk_render_chunk PUBLIC
+    Vulkan::Vulkan dh_vk_buffer dh_chunk dh_coords)
+target_include_directories(dh_vk_render_chunk SYSTEM PRIVATE ${Vulkan_INCLUDE_DIRS})
+dh_set_warnings(dh_vk_render_chunk)
+
+add_library(dh_vk_streamer STATIC src/vk/chunk_streamer.cpp)
+target_include_directories(dh_vk_streamer PUBLIC include)
+target_link_libraries(dh_vk_streamer PUBLIC
+    Vulkan::Vulkan dh_vk_render_chunk dh_coords)
+target_include_directories(dh_vk_streamer SYSTEM PRIVATE ${Vulkan_INCLUDE_DIRS})
+dh_set_warnings(dh_vk_streamer)
+
 # --- shaders ---
 set(DH_SHADER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
 set(DH_SHADER_BIN_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders)
@@ -187,6 +207,9 @@ target_link_libraries(dh_vk_terrain PRIVATE
     dh_vk_shader
     dh_vk_math
     dh_vk_camera
+    dh_vk_buffer
+    dh_vk_render_chunk
+    dh_vk_streamer
     dh_chunk
     dh_coords
 )

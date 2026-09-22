@@ -1,4 +1,4 @@
-// G3: terrain with free camera. WASD + mouse.
+// G4: infinite terrain via chunk streaming. WASD + mouse.
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <VkBootstrap.h>
@@ -6,6 +6,7 @@
 #include "dh/vk/shader.hpp"
 #include "dh/vk/math.hpp"
 #include "dh/vk/camera.hpp"
+#include "dh/vk/chunk_streamer.hpp"
 #include "dh/chunk.hpp"
 #include <cmath>
 #include <cstdio>
@@ -20,19 +21,12 @@ namespace {
 constexpr int kWidth  = 1280;
 constexpr int kHeight = 720;
 
-constexpr int32_t GRID = 15;
-constexpr int32_t S    = dh::chunk::SIZE;
-constexpr int32_t N    = S * GRID;
+constexpr int32_t kStreamRadius = 6;
+constexpr int     kBuildsPerFrame = 2;
 
 #ifndef DH_SHADER_DIR
 #define DH_SHADER_DIR "shaders"
 #endif
-
-struct Buffer {
-    VkBuffer       handle = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
-    uint32_t       count  = 0;
-};
 
 struct Renderer {
     SDL_Window*       window   = nullptr;
@@ -63,14 +57,12 @@ struct Renderer {
     VkSemaphore     image_ready = VK_NULL_HANDLE;
     VkFence         in_flight   = VK_NULL_HANDLE;
 
-    Buffer            vertex_buf;
-    Buffer            index_buf;
-    dh::vk::Camera    camera;
-    dh::vk::Mat4      mvp;
+    dh::vk::Camera            camera;
+    dh::vk::Mat4              mvp;
+    dh::vk::ChunkStreamer*    streamer = nullptr;
 
-    // Input state
-    float  mouse_accum_x = 0.0f;
-    float  mouse_accum_y = 0.0f;
+    float mouse_accum_x = 0.0f;
+    float mouse_accum_y = 0.0f;
 
     bool running = true;
 };
@@ -80,145 +72,6 @@ void vk_check(VkResult r, const char* what) {
         std::fprintf(stderr, "Vulkan error %d at %s\n", (int)r, what);
         std::exit(1);
     }
-}
-
-uint32_t find_memory_type(VkPhysicalDevice phys, uint32_t type_bits,
-                          VkMemoryPropertyFlags props) {
-    VkPhysicalDeviceMemoryProperties mp{};
-    vkGetPhysicalDeviceMemoryProperties(phys, &mp);
-    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
-        if ((type_bits & (1u << i)) &&
-            (mp.memoryTypes[i].propertyFlags & props) == props) {
-            return i;
-        }
-    }
-    throw std::runtime_error("no suitable memory type");
-}
-
-Buffer create_buffer(Renderer& r, VkDeviceSize size, VkBufferUsageFlags usage,
-                     const void* data) {
-    Buffer b;
-    VkBufferCreateInfo bi{};
-    bi.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bi.size        = size;
-    bi.usage       = usage;
-    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    vk_check(vkCreateBuffer(r.device, &bi, nullptr, &b.handle), "vkCreateBuffer");
-
-    VkMemoryRequirements req{};
-    vkGetBufferMemoryRequirements(r.device, b.handle, &req);
-
-    VkMemoryAllocateInfo ai{};
-    ai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    ai.allocationSize  = req.size;
-    ai.memoryTypeIndex = find_memory_type(r.physical, req.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    vk_check(vkAllocateMemory(r.device, &ai, nullptr, &b.memory), "vkAllocateMemory");
-    vk_check(vkBindBufferMemory(r.device, b.handle, b.memory, 0), "vkBindBufferMemory");
-
-    if (data) {
-        void* mapped = nullptr;
-        vk_check(vkMapMemory(r.device, b.memory, 0, size, 0, &mapped), "vkMapMemory");
-        std::memcpy(mapped, data, size);
-        vkUnmapMemory(r.device, b.memory);
-    }
-    return b;
-}
-
-void build_terrain_mesh(Renderer& r, uint64_t seed, uint16_t version,
-                        dh::coords::ChunkAddress origin) {
-    std::vector<float> elev(static_cast<size_t>(N) * N, 0.0f);
-    for (int32_t cz = 0; cz < GRID; ++cz) {
-        for (int32_t cx = 0; cx < GRID; ++cx) {
-            dh::chunk::Chunk c;
-            c.address = { origin.x + cx, origin.z + cz };
-            c.generation_version = version;
-            dh::chunk::generate(c, seed);
-            for (int32_t lz = 0; lz < S; ++lz) {
-                for (int32_t lx = 0; lx < S; ++lx) {
-                    const int32_t gx = cx * S + lx;
-                    const int32_t gz = cz * S + lz;
-                    elev[static_cast<size_t>(gz) * N + gx] =
-                        c.elevation[lz * S + lx];
-                }
-            }
-        }
-    }
-
-    float  min_e = 1e30f, max_e = -1e30f;
-    double sum_e = 0.0;
-    for (float e : elev) {
-        if (e < min_e) min_e = e;
-        if (e > max_e) max_e = e;
-        sum_e += static_cast<double>(e);
-    }
-    const float avg_e = static_cast<float>(sum_e / static_cast<double>(elev.size()));
-    std::fprintf(stderr, "[terrain] elevation: min=%.1f max=%.1f avg=%.1f range=%.1f\n",
-                 min_e, max_e, avg_e, max_e - min_e);
-
-    std::vector<float> verts;
-    verts.reserve(static_cast<size_t>(N) * N * 6);
-    const float base_x = static_cast<float>(origin.x * static_cast<int32_t>(dh::coords::CHUNK_SIZE_XZ));
-    const float base_z = static_cast<float>(origin.z * static_cast<int32_t>(dh::coords::CHUNK_SIZE_XZ));
-
-    auto sample_elev = [&](int32_t x, int32_t z) -> float {
-        if (x < 0) x = 0;
-        if (z < 0) z = 0;
-        if (x >= N) x = N - 1;
-        if (z >= N) z = N - 1;
-        return elev[static_cast<size_t>(z) * N + x];
-    };
-
-    for (int32_t gz = 0; gz < N; ++gz) {
-        for (int32_t gx = 0; gx < N; ++gx) {
-            const float hL = sample_elev(gx - 1, gz);
-            const float hR = sample_elev(gx + 1, gz);
-            const float hD = sample_elev(gx, gz - 1);
-            const float hU = sample_elev(gx, gz + 1);
-            float nx = (hL - hR) * 0.5f;
-            float nz = (hD - hU) * 0.5f;
-            float ny = 1.0f;
-            const float len = std::sqrt(nx*nx + ny*ny + nz*nz);
-            nx /= len; ny /= len; nz /= len;
-
-            verts.push_back(base_x + static_cast<float>(gx));
-            verts.push_back(elev[static_cast<size_t>(gz) * N + gx]);
-            verts.push_back(base_z + static_cast<float>(gz));
-            verts.push_back(nx);
-            verts.push_back(ny);
-            verts.push_back(nz);
-        }
-    }
-
-    std::vector<uint32_t> idx;
-    idx.reserve(static_cast<size_t>(N - 1) * (N - 1) * 6);
-    for (int32_t gz = 0; gz < N - 1; ++gz) {
-        for (int32_t gx = 0; gx < N - 1; ++gx) {
-            const uint32_t v00 = static_cast<uint32_t>(gz * N + gx);
-            const uint32_t v10 = v00 + 1;
-            const uint32_t v01 = v00 + static_cast<uint32_t>(N);
-            const uint32_t v11 = v01 + 1;
-            idx.push_back(v00); idx.push_back(v01); idx.push_back(v10);
-            idx.push_back(v10); idx.push_back(v01); idx.push_back(v11);
-        }
-    }
-
-    r.vertex_buf = create_buffer(r, verts.size() * sizeof(float),
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, verts.data());
-    r.vertex_buf.count = static_cast<uint32_t>(verts.size() / 6);
-
-    r.index_buf = create_buffer(r, idx.size() * sizeof(uint32_t),
-        VK_BUFFER_USAGE_INDEX_BUFFER_BIT, idx.data());
-    r.index_buf.count = static_cast<uint32_t>(idx.size());
-
-    // Camera initial position: off to a corner, looking at grid center.
-    const float cx = base_x + static_cast<float>(N / 2);
-    const float cz = base_z + static_cast<float>(N / 2);
-    const float dist = static_cast<float>(N) * 0.6f;
-    r.camera.x = cx + dist;
-    r.camera.y = avg_e + dist * 0.7f;
-    r.camera.z = cz + dist;
-    r.camera.look_at_world(cx, avg_e, cz);
 }
 
 void destroy_swapchain(Renderer& r) {
@@ -342,7 +195,8 @@ void create_pipeline(Renderer& r) {
     stages[1].module = frag; stages[1].pName = "main";
 
     VkVertexInputBindingDescription bind{};
-    bind.binding = 0; bind.stride = 6 * sizeof(float);
+    bind.binding   = 0;
+    bind.stride    = 6 * sizeof(float);
     bind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
     VkVertexInputAttributeDescription attrs[2]{};
@@ -354,78 +208,81 @@ void create_pipeline(Renderer& r) {
 
     VkPipelineVertexInputStateCreateInfo vi{};
     vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vi.vertexBindingDescriptionCount = 1;
-    vi.pVertexBindingDescriptions = &bind;
+    vi.vertexBindingDescriptionCount   = 1;
+    vi.pVertexBindingDescriptions      = &bind;
     vi.vertexAttributeDescriptionCount = 2;
-    vi.pVertexAttributeDescriptions = attrs;
+    vi.pVertexAttributeDescriptions    = attrs;
 
     VkPipelineInputAssemblyStateCreateInfo ia{};
-    ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    ia.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
     VkPipelineViewportStateCreateInfo vp{};
-    vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    vp.sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
     vp.viewportCount = 1; vp.scissorCount = 1;
 
     VkPipelineRasterizationStateCreateInfo rast{};
-    rast.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rast.sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rast.polygonMode = VK_POLYGON_MODE_FILL;
-    rast.cullMode = VK_CULL_MODE_BACK_BIT;
-    rast.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    rast.lineWidth = 1.0f;
+    rast.cullMode    = VK_CULL_MODE_BACK_BIT;
+    rast.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rast.lineWidth   = 1.0f;
 
     VkPipelineMultisampleStateCreateInfo ms{};
-    ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    ms.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
     VkPipelineColorBlendAttachmentState cba{};
     cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     VkPipelineColorBlendStateCreateInfo cb{};
-    cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    cb.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     cb.attachmentCount = 1; cb.pAttachments = &cba;
 
     VkDynamicState dyn_states[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
     VkPipelineDynamicStateCreateInfo dyn{};
-    dyn.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dyn.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
     dyn.dynamicStateCount = 2; dyn.pDynamicStates = dyn_states;
 
     VkPushConstantRange pc_range{};
     pc_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-    pc_range.offset = 0; pc_range.size = sizeof(dh::vk::Mat4);
+    pc_range.offset     = 0;
+    pc_range.size       = sizeof(dh::vk::Mat4);
 
     VkPipelineLayoutCreateInfo pl{};
-    pl.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pl.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pl.pushConstantRangeCount = 1; pl.pPushConstantRanges = &pc_range;
     vk_check(vkCreatePipelineLayout(r.device, &pl, nullptr, &r.pipeline_layout),
              "vkCreatePipelineLayout");
 
     VkGraphicsPipelineCreateInfo info{};
-    info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    info.stageCount = 2; info.pStages = stages;
-    info.pVertexInputState = &vi;
+    info.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    info.stageCount          = 2;
+    info.pStages             = stages;
+    info.pVertexInputState   = &vi;
     info.pInputAssemblyState = &ia;
-    info.pViewportState = &vp;
+    info.pViewportState      = &vp;
     info.pRasterizationState = &rast;
-    info.pMultisampleState = &ms;
-    info.pColorBlendState = &cb;
-    info.pDynamicState = &dyn;
-    info.layout = r.pipeline_layout;
-    info.renderPass = r.render_pass; info.subpass = 0;
+    info.pMultisampleState   = &ms;
+    info.pColorBlendState    = &cb;
+    info.pDynamicState       = &dyn;
+    info.layout              = r.pipeline_layout;
+    info.renderPass          = r.render_pass;
+    info.subpass             = 0;
     vk_check(vkCreateGraphicsPipelines(r.device, VK_NULL_HANDLE, 1, &info,
-                                       nullptr, &r.pipeline), "vkCreateGraphicsPipelines");
+                                       nullptr, &r.pipeline),
+             "vkCreateGraphicsPipelines");
 
     vkDestroyShaderModule(r.device, vert, nullptr);
     vkDestroyShaderModule(r.device, frag, nullptr);
 }
 
-void init_vulkan(Renderer& r, uint64_t seed, uint16_t version,
-                 dh::coords::ChunkAddress origin) {
+void init_vulkan(Renderer& r, uint64_t seed, uint16_t version) {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
         std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         std::exit(1);
     }
-    r.window = SDL_CreateWindow("digital-humans | G3",
+    r.window = SDL_CreateWindow("digital-humans | G4",
                                 kWidth, kHeight,
                                 SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
     if (!r.window) {
@@ -485,9 +342,17 @@ void init_vulkan(Renderer& r, uint64_t seed, uint16_t version,
     create_render_pass(r);
     create_swapchain(r);
     create_pipeline(r);
-    build_terrain_mesh(r, seed, version, origin);
 
-    // Capture the mouse for camera look.
+    r.streamer = new dh::vk::ChunkStreamer(r.device, r.physical, seed, version,
+                                           kStreamRadius);
+
+    // Initial camera: standing on the terrain at chunk (0,0) center.
+    const float cam_y = dh::chunk::elevation_at({0, 0}, 32, 32, seed, version) + 30.0f;
+    r.camera.x = 32.0f;
+    r.camera.y = cam_y;
+    r.camera.z = 32.0f + 100.0f;
+    r.camera.look_at_world(32.0f, cam_y - 15.0f, 32.0f);
+
     SDL_SetWindowRelativeMouseMode(r.window, true);
 }
 
@@ -548,9 +413,13 @@ void record_command(Renderer& r, uint32_t image_index) {
     vkCmdSetScissor(r.cmd, 0, 1, &sc);
 
     VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(r.cmd, 0, 1, &r.vertex_buf.handle, &offset);
-    vkCmdBindIndexBuffer(r.cmd, r.index_buf.handle, 0, VK_INDEX_TYPE_UINT32);
-    vkCmdDrawIndexed(r.cmd, r.index_buf.count, 1, 0, 0, 0);
+    for (const auto& kv : r.streamer->chunks()) {
+        const dh::vk::RenderChunk& rc = kv.second;
+        if (rc.index.count == 0) continue;
+        vkCmdBindVertexBuffers(r.cmd, 0, 1, &rc.vertex.handle, &offset);
+        vkCmdBindIndexBuffer(r.cmd, rc.index.handle, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(r.cmd, rc.index.count, 1, 0, 0, 0);
+    }
 
     vkCmdEndRenderPass(r.cmd);
     vk_check(vkEndCommandBuffer(r.cmd), "end");
@@ -604,14 +473,12 @@ void poll_events(Renderer& r) {
 }
 
 void update_camera(Renderer& r, float dt) {
-    // Look
     if (r.mouse_accum_x != 0.0f || r.mouse_accum_y != 0.0f) {
         r.camera.rotate(r.mouse_accum_x, r.mouse_accum_y);
         r.mouse_accum_x = 0.0f;
         r.mouse_accum_y = 0.0f;
     }
 
-    // Move
     float forward = 0.0f, right = 0.0f, up = 0.0f;
     const bool* keys = SDL_GetKeyboardState(nullptr);
     if (keys[SDL_SCANCODE_W]) forward += 1.0f;
@@ -620,14 +487,12 @@ void update_camera(Renderer& r, float dt) {
     if (keys[SDL_SCANCODE_A]) right   -= 1.0f;
     if (keys[SDL_SCANCODE_E]) up      += 1.0f;
     if (keys[SDL_SCANCODE_Q]) up      -= 1.0f;
-    if (keys[SDL_SCANCODE_LSHIFT]) r.camera.speed = 900.0f;
-    else                           r.camera.speed = 300.0f;
+    r.camera.speed = keys[SDL_SCANCODE_LSHIFT] ? 900.0f : 300.0f;
 
     if (forward != 0.0f || right != 0.0f || up != 0.0f) {
         r.camera.move(forward, right, up, dt);
     }
 
-    // Rebuild MVP
     const dh::vk::Mat4 view = r.camera.view();
     const dh::vk::Mat4 proj = dh::vk::perspective_vk(
         60.0f * 3.14159265f / 180.0f,
@@ -639,10 +504,8 @@ void update_camera(Renderer& r, float dt) {
 void shutdown(Renderer& r) {
     vkDeviceWaitIdle(r.device);
 
-    vkDestroyBuffer(r.device, r.vertex_buf.handle, nullptr);
-    vkFreeMemory(r.device, r.vertex_buf.memory, nullptr);
-    vkDestroyBuffer(r.device, r.index_buf.handle, nullptr);
-    vkFreeMemory(r.device, r.index_buf.memory, nullptr);
+    delete r.streamer;
+    r.streamer = nullptr;
 
     vkDestroyPipeline(r.device, r.pipeline, nullptr);
     vkDestroyPipelineLayout(r.device, r.pipeline_layout, nullptr);
@@ -668,15 +531,14 @@ void shutdown(Renderer& r) {
 int main(int, char**) {
     Renderer r;
     try {
-        init_vulkan(r, 42, 1, { -7, -7 });
+        init_vulkan(r, 42, 1);
         init_commands(r);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "init failed: %s\n", e.what());
         return 1;
     }
 
-    std::printf("G3: terrain + camera. WASD move, QE up/down, mouse look, "
-                "Shift=fast, ESC=quit.\n");
+    std::printf("G4: streaming terrain. WASD, QE, mouse, Shift=fast, ESC=quit.\n");
     std::fflush(stdout);
 
     Uint64 prev = SDL_GetTicks();
@@ -687,9 +549,16 @@ int main(int, char**) {
         const Uint64 now = SDL_GetTicks();
         float dt = static_cast<float>(now - prev) / 1000.0f;
         prev = now;
-        if (dt > 0.1f) dt = 0.1f;   // clamp after a stall
+        if (dt > 0.1f) dt = 0.1f;
 
         update_camera(r, dt);
+
+        // Ensure the GPU has finished the previous frame before we destroy
+        // any buffers the streamer may evict this frame.
+        vkWaitForFences(r.device, 1, &r.in_flight, VK_TRUE, UINT64_MAX);
+
+        r.streamer->update(r.camera.x, r.camera.y, r.camera.z, kBuildsPerFrame);
+
         draw_frame(r);
     }
     shutdown(r);
