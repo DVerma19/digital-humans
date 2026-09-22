@@ -50,6 +50,12 @@ target_include_directories(dh_rng PUBLIC include)
 target_link_libraries(dh_rng PRIVATE dh_hash)
 dh_set_warnings(dh_rng)
 
+# --- noise ---
+add_library(dh_noise STATIC src/noise.cpp)
+target_include_directories(dh_noise PUBLIC include)
+target_link_libraries(dh_noise PRIVATE dh_hash)
+dh_set_warnings(dh_noise)
+
 # --- tests ---
 enable_testing()
 
@@ -67,3 +73,8 @@ add_executable(dh_rng_tests tests/rng_test.cpp)
 target_link_libraries(dh_rng_tests PRIVATE dh_rng Catch2::Catch2WithMain)
 dh_set_warnings(dh_rng_tests)
 add_test(NAME rng COMMAND dh_rng_tests)
+
+add_executable(dh_noise_tests tests/noise_test.cpp)
+target_link_libraries(dh_noise_tests PRIVATE dh_noise Catch2::Catch2WithMain)
+dh_set_warnings(dh_noise_tests)
+add_test(NAME noise COMMAND dh_noise_tests)

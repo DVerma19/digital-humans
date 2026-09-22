@@ -14,14 +14,18 @@ Those belong in `NOISE_PARAMS.md`, which is data, not contract.
 
 ---
 
-## 1. Library
+## 1. Implementation
 
-**FastNoise2**, MIT license, pinned tag via FetchContent.
+Noise is provided by a **custom value-noise implementation** in `dh::noise`,
+seeded by the field seed defined in §3. No third-party noise library is
+required.
 
-No other noise library is permitted. If a feature is missing, it is
-written as post-processing on top of FastNoise2, not by swapping the
-library.
+Rationale: bit-identical output across machines, no runtime SIMD dispatch,
+full inspectability. FastNoise2 may be added later behind the same API, but
+only if it can be configured to produce bit-identical output across machines.
 
+The public API is `dh::noise::sample` and `dh::noise::sample_default`. No
+other entry points are permitted.
 ---
 
 ## 2. Field IDs
@@ -46,30 +50,20 @@ New fields take the next free ID. Retired fields keep their ID forever.
 
 ---
 
-## 3. Stream Seeding
+## 3. Field Seed
 
-Each field has exactly one PCG64 stream per world frame.
+Each field has exactly one seed per world frame.
 
-```
-stream_seed = PCG64(
-    hash64(world_seed, generation_version, field_id)
-)
-```
-
-Where `hash64` is the low 64 bits of `BLAKE3` over the canonical bytes:
-
-```
-hash_input = LE64(world_seed) || LE16(generation_version) || LE16(field_id)
-```
+    field_seed = hash::field_seed(world_seed, generation_version, field_id)
 
 Rules:
 
-1. One stream per `(world_seed, generation_version, field_id)`.
-2. Streams are never shared between fields.
-3. Streams are never reused across worlds.
-4. Stream state is never stored. It is derived on first use.
-5. The stream is used **only** for the noise field's construction.
-   Post-processing does not draw from it.
+1. One seed per `(world_seed, generation_version, field_id)`.
+2. Seeds are never shared between fields.
+3. Seeds are never reused across worlds.
+4. The seed is used to construct the field. Per-point values are derived
+   from `(field_seed, integer lattice coordinates)` via an integer hash.
+5. Post-processing does not consume from the seed or any derived stream.
 
 ---
 
