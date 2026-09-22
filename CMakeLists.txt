@@ -5,12 +5,6 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Warnings
-add_compile_options(
-    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Wconversion -Wshadow>
-    $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
-)
-
 include(FetchContent)
 FetchContent_Declare(
     catch2
@@ -19,15 +13,32 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(catch2)
 
+# A helper to apply warnings only to our targets.
+function(dh_set_warnings target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(${target} PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+            -Wconversion
+            -Wshadow
+        )
+    endif()
+endfunction()
+
 add_library(dh_coords STATIC
     src/coords.cpp
 )
 target_include_directories(dh_coords PUBLIC include)
+dh_set_warnings(dh_coords)
 
 add_executable(dh_coords_tests
     tests/coords_test.cpp
 )
 target_link_libraries(dh_coords_tests PRIVATE dh_coords Catch2::Catch2WithMain)
+dh_set_warnings(dh_coords_tests)
 
 enable_testing()
 add_test(NAME coords COMMAND dh_coords_tests)
