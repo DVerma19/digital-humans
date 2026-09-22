@@ -56,6 +56,12 @@ target_include_directories(dh_noise PUBLIC include)
 target_link_libraries(dh_noise PRIVATE dh_hash)
 dh_set_warnings(dh_noise)
 
+# --- chunk ---
+add_library(dh_chunk STATIC src/chunk.cpp)
+target_include_directories(dh_chunk PUBLIC include)
+target_link_libraries(dh_chunk PRIVATE dh_coords dh_hash dh_noise)
+dh_set_warnings(dh_chunk)
+
 # --- tests ---
 enable_testing()
 
@@ -78,3 +84,8 @@ add_executable(dh_noise_tests tests/noise_test.cpp)
 target_link_libraries(dh_noise_tests PRIVATE dh_noise Catch2::Catch2WithMain)
 dh_set_warnings(dh_noise_tests)
 add_test(NAME noise COMMAND dh_noise_tests)
+
+add_executable(dh_chunk_tests tests/chunk_test.cpp)
+target_link_libraries(dh_chunk_tests PRIVATE dh_chunk Catch2::Catch2WithMain)
+dh_set_warnings(dh_chunk_tests)
+add_test(NAME chunk COMMAND dh_chunk_tests)
