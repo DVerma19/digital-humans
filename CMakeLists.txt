@@ -7,13 +7,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(FetchContent)
 
+# --- Catch2 ---
 FetchContent_Declare(catch2
     GIT_REPOSITORY https://github.com/catchorg/Catch2.git
     GIT_TAG        v3.7.1
 )
 FetchContent_MakeAvailable(catch2)
 
-# BLAKE3's CMakeLists lives in c/, not at repo root.
+# --- BLAKE3 ---
 FetchContent_Declare(blake3
     GIT_REPOSITORY https://github.com/BLAKE3-team/BLAKE3.git
     GIT_TAG        1.5.4
@@ -21,6 +22,27 @@ FetchContent_Declare(blake3
 )
 FetchContent_MakeAvailable(blake3)
 
+# --- SDL3 (static) ---
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(SDL_STATIC ON  CACHE BOOL "" FORCE)
+FetchContent_Declare(SDL3
+    GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+    GIT_TAG        release-3.2.0
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(SDL3)
+
+# --- vk-bootstrap ---
+FetchContent_Declare(vk-bootstrap
+    GIT_REPOSITORY https://github.com/charles-lunarg/vk-bootstrap.git
+    GIT_TAG        v1.3.296
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(vk-bootstrap)
+
+find_package(Vulkan REQUIRED)
+
+# --- common warnings ---
 function(dh_set_warnings target)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /permissive-)
@@ -68,10 +90,16 @@ target_include_directories(dh_chunk_manager PUBLIC include)
 target_link_libraries(dh_chunk_manager PRIVATE dh_chunk)
 dh_set_warnings(dh_chunk_manager)
 
+# --- img_dump ---
 add_library(dh_img_dump STATIC src/img_dump.cpp)
 target_include_directories(dh_img_dump PUBLIC include)
 target_link_libraries(dh_img_dump PRIVATE dh_chunk)
 dh_set_warnings(dh_img_dump)
+
+# --- dump tool ---
+add_executable(dh_dump src/dump_main.cpp)
+target_link_libraries(dh_dump PRIVATE dh_img_dump)
+dh_set_warnings(dh_dump)
 
 # --- tests ---
 enable_testing()
@@ -106,6 +134,14 @@ target_link_libraries(dh_chunk_manager_tests PRIVATE dh_chunk_manager Catch2::Ca
 dh_set_warnings(dh_chunk_manager_tests)
 add_test(NAME chunk_manager COMMAND dh_chunk_manager_tests)
 
-add_executable(dh_dump src/dump_main.cpp)
-target_link_libraries(dh_dump PRIVATE dh_img_dump)
-dh_set_warnings(dh_dump)
+# --- Vulkan G0 smoke test ---
+add_executable(dh_vk src/vk_main.cpp)
+target_link_libraries(dh_vk PRIVATE
+    SDL3::SDL3-static
+    vk-bootstrap::vk-bootstrap
+    Vulkan::Vulkan
+)
+target_include_directories(dh_vk SYSTEM PRIVATE
+    ${vk-bootstrap_SOURCE_DIR}/src
+)
+dh_set_warnings(dh_vk)
