@@ -62,6 +62,12 @@ target_include_directories(dh_chunk PUBLIC include)
 target_link_libraries(dh_chunk PRIVATE dh_coords dh_hash dh_noise)
 dh_set_warnings(dh_chunk)
 
+# --- chunk_manager ---
+add_library(dh_chunk_manager STATIC src/chunk_manager.cpp)
+target_include_directories(dh_chunk_manager PUBLIC include)
+target_link_libraries(dh_chunk_manager PRIVATE dh_chunk)
+dh_set_warnings(dh_chunk_manager)
+
 # --- tests ---
 enable_testing()
 
@@ -89,3 +95,8 @@ add_executable(dh_chunk_tests tests/chunk_test.cpp)
 target_link_libraries(dh_chunk_tests PRIVATE dh_chunk Catch2::Catch2WithMain)
 dh_set_warnings(dh_chunk_tests)
 add_test(NAME chunk COMMAND dh_chunk_tests)
+
+add_executable(dh_chunk_manager_tests tests/chunk_manager_test.cpp)
+target_link_libraries(dh_chunk_manager_tests PRIVATE dh_chunk_manager Catch2::Catch2WithMain)
+dh_set_warnings(dh_chunk_manager_tests)
+add_test(NAME chunk_manager COMMAND dh_chunk_manager_tests)
