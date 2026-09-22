@@ -1,9 +1,11 @@
-// G2a: terrain mesh from chunk::Manager. 15x15 chunk grid, lit.
+// G3: terrain with free camera. WASD + mouse.
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <VkBootstrap.h>
 #include <vulkan/vulkan.h>
 #include "dh/vk/shader.hpp"
+#include "dh/vk/math.hpp"
+#include "dh/vk/camera.hpp"
 #include "dh/chunk.hpp"
 #include <cmath>
 #include <cstdio>
@@ -19,63 +21,12 @@ constexpr int kWidth  = 1280;
 constexpr int kHeight = 720;
 
 constexpr int32_t GRID = 15;
-constexpr int32_t S    = dh::chunk::SIZE;   // 64
-constexpr int32_t N    = S * GRID;          // 960
+constexpr int32_t S    = dh::chunk::SIZE;
+constexpr int32_t N    = S * GRID;
 
 #ifndef DH_SHADER_DIR
 #define DH_SHADER_DIR "shaders"
 #endif
-
-struct Mat4 { float m[16]; };
-
-Mat4 identity() {
-    Mat4 r{};
-    r.m[0] = r.m[5] = r.m[10] = r.m[15] = 1.0f;
-    return r;
-}
-
-Mat4 mul(const Mat4& a, const Mat4& b) {
-    Mat4 r{};
-    for (int c = 0; c < 4; ++c)
-        for (int rw = 0; rw < 4; ++rw) {
-            float s = 0.0f;
-            for (int k = 0; k < 4; ++k) s += a.m[k * 4 + rw] * b.m[c * 4 + k];
-            r.m[c * 4 + rw] = s;
-        }
-    return r;
-}
-
-Mat4 perspective(float fovy_rad, float aspect, float zn, float zf) {
-    Mat4 r{};
-    const float f = 1.0f / std::tan(fovy_rad * 0.5f);
-    r.m[0]  = f / aspect;
-    r.m[5]  = -f;
-    r.m[10] = zf / (zn - zf);
-    r.m[11] = -1.0f;
-    r.m[14] = (zn * zf) / (zn - zf);
-    return r;
-}
-
-Mat4 look_at(float ex, float ey, float ez,
-             float cx, float cy, float cz,
-             float ux, float uy, float uz) {
-    float fx = cx - ex, fy = cy - ey, fz = cz - ez;
-    float fl = std::sqrt(fx*fx + fy*fy + fz*fz);
-    fx /= fl; fy /= fl; fz /= fl;
-    float sx = fy*uz - fz*uy;
-    float sy = fz*ux - fx*uz;
-    float sz = fx*uy - fy*ux;
-    float sl = std::sqrt(sx*sx + sy*sy + sz*sz);
-    sx /= sl; sy /= sl; sz /= sl;
-    float tx = sy*fz - sz*fy;
-    float ty = sz*fx - sx*fz;
-    float tz = sx*fy - sy*fx;
-    Mat4 r = identity();
-    r.m[0] = sx;  r.m[4] = sy;  r.m[8]  = sz;  r.m[12] = -(sx*ex + sy*ey + sz*ez);
-    r.m[1] = tx;  r.m[5] = ty;  r.m[9]  = tz;  r.m[13] = -(tx*ex + ty*ey + tz*ez);
-    r.m[2] = -fx; r.m[6] = -fy; r.m[10] = -fz; r.m[14] = (fx*ex + fy*ey + fz*ez);
-    return r;
-}
 
 struct Buffer {
     VkBuffer       handle = VK_NULL_HANDLE;
@@ -112,9 +63,14 @@ struct Renderer {
     VkSemaphore     image_ready = VK_NULL_HANDLE;
     VkFence         in_flight   = VK_NULL_HANDLE;
 
-    Buffer vertex_buf;
-    Buffer index_buf;
-    Mat4   mvp;
+    Buffer            vertex_buf;
+    Buffer            index_buf;
+    dh::vk::Camera    camera;
+    dh::vk::Mat4      mvp;
+
+    // Input state
+    float  mouse_accum_x = 0.0f;
+    float  mouse_accum_y = 0.0f;
 
     bool running = true;
 };
@@ -171,7 +127,6 @@ Buffer create_buffer(Renderer& r, VkDeviceSize size, VkBufferUsageFlags usage,
 
 void build_terrain_mesh(Renderer& r, uint64_t seed, uint16_t version,
                         dh::coords::ChunkAddress origin) {
-    // 1. Sample the grid.
     std::vector<float> elev(static_cast<size_t>(N) * N, 0.0f);
     for (int32_t cz = 0; cz < GRID; ++cz) {
         for (int32_t cx = 0; cx < GRID; ++cx) {
@@ -190,9 +145,7 @@ void build_terrain_mesh(Renderer& r, uint64_t seed, uint16_t version,
         }
     }
 
-    // 2. Elevation range.
-    float  min_e = 1e30f;
-    float  max_e = -1e30f;
+    float  min_e = 1e30f, max_e = -1e30f;
     double sum_e = 0.0;
     for (float e : elev) {
         if (e < min_e) min_e = e;
@@ -202,9 +155,7 @@ void build_terrain_mesh(Renderer& r, uint64_t seed, uint16_t version,
     const float avg_e = static_cast<float>(sum_e / static_cast<double>(elev.size()));
     std::fprintf(stderr, "[terrain] elevation: min=%.1f max=%.1f avg=%.1f range=%.1f\n",
                  min_e, max_e, avg_e, max_e - min_e);
-    std::fflush(stderr);
 
-    // 3. Vertices with normals from finite differences.
     std::vector<float> verts;
     verts.reserve(static_cast<size_t>(N) * N * 6);
     const float base_x = static_cast<float>(origin.x * static_cast<int32_t>(dh::coords::CHUNK_SIZE_XZ));
@@ -239,7 +190,6 @@ void build_terrain_mesh(Renderer& r, uint64_t seed, uint16_t version,
         }
     }
 
-    // 4. Indices.
     std::vector<uint32_t> idx;
     idx.reserve(static_cast<size_t>(N - 1) * (N - 1) * 6);
     for (int32_t gz = 0; gz < N - 1; ++gz) {
@@ -261,18 +211,14 @@ void build_terrain_mesh(Renderer& r, uint64_t seed, uint16_t version,
         VK_BUFFER_USAGE_INDEX_BUFFER_BIT, idx.data());
     r.index_buf.count = static_cast<uint32_t>(idx.size());
 
-    // 5. Camera: pulled back to see the whole grid.
+    // Camera initial position: off to a corner, looking at grid center.
     const float cx = base_x + static_cast<float>(N / 2);
     const float cz = base_z + static_cast<float>(N / 2);
-    const float dist = static_cast<float>(N) * 0.75f;
-    Mat4 view = look_at(cx + dist, avg_e + dist * 0.9f, cz + dist,
-                        cx, avg_e, cz,
-                        0.0f, 1.0f, 0.0f);
-    Mat4 proj = perspective(45.0f * 3.14159265f / 180.0f,
-                            static_cast<float>(r.extent.width) /
-                            static_cast<float>(r.extent.height),
-                            1.0f, 10000.0f);
-    r.mvp = mul(proj, view);
+    const float dist = static_cast<float>(N) * 0.6f;
+    r.camera.x = cx + dist;
+    r.camera.y = avg_e + dist * 0.7f;
+    r.camera.z = cz + dist;
+    r.camera.look_at_world(cx, avg_e, cz);
 }
 
 void destroy_swapchain(Renderer& r) {
@@ -304,10 +250,8 @@ void create_swapchain(Renderer& r) {
     r.swapchain   = sc.swapchain;
     r.swap_format = sc.image_format;
     r.extent      = sc.extent;
-    auto imgs = sc.get_images();
-    auto vs   = sc.get_image_views();
-    r.images = imgs.value();
-    r.views  = vs.value();
+    r.images      = sc.get_images().value();
+    r.views       = sc.get_image_views().value();
     r.framebuffers.resize(r.views.size(), VK_NULL_HANDLE);
     for (size_t i = 0; i < r.views.size(); ++i) {
         VkFramebufferCreateInfo fi{};
@@ -392,96 +336,84 @@ void create_pipeline(Renderer& r) {
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
-    stages[0].module = vert;
-    stages[0].pName  = "main";
+    stages[0].module = vert; stages[0].pName = "main";
     stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = frag;
-    stages[1].pName  = "main";
+    stages[1].module = frag; stages[1].pName = "main";
 
     VkVertexInputBindingDescription bind{};
-    bind.binding   = 0;
-    bind.stride    = 6 * sizeof(float);
+    bind.binding = 0; bind.stride = 6 * sizeof(float);
     bind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
     VkVertexInputAttributeDescription attrs[2]{};
     attrs[0].location = 0; attrs[0].binding = 0;
-    attrs[0].format   = VK_FORMAT_R32G32B32_SFLOAT; attrs[0].offset = 0;
+    attrs[0].format = VK_FORMAT_R32G32B32_SFLOAT; attrs[0].offset = 0;
     attrs[1].location = 1; attrs[1].binding = 0;
-    attrs[1].format   = VK_FORMAT_R32G32B32_SFLOAT;
-    attrs[1].offset   = 3 * sizeof(float);
+    attrs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    attrs[1].offset = 3 * sizeof(float);
 
     VkPipelineVertexInputStateCreateInfo vi{};
     vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vi.vertexBindingDescriptionCount   = 1;
-    vi.pVertexBindingDescriptions      = &bind;
+    vi.vertexBindingDescriptionCount = 1;
+    vi.pVertexBindingDescriptions = &bind;
     vi.vertexAttributeDescriptionCount = 2;
-    vi.pVertexAttributeDescriptions    = attrs;
+    vi.pVertexAttributeDescriptions = attrs;
 
     VkPipelineInputAssemblyStateCreateInfo ia{};
-    ia.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
     VkPipelineViewportStateCreateInfo vp{};
-    vp.sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-    vp.viewportCount = 1;
-    vp.scissorCount  = 1;
+    vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    vp.viewportCount = 1; vp.scissorCount = 1;
 
     VkPipelineRasterizationStateCreateInfo rast{};
-    rast.sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rast.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rast.polygonMode = VK_POLYGON_MODE_FILL;
-    rast.cullMode    = VK_CULL_MODE_BACK_BIT;
-    rast.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    rast.lineWidth   = 1.0f;
+    rast.cullMode = VK_CULL_MODE_BACK_BIT;
+    rast.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rast.lineWidth = 1.0f;
 
     VkPipelineMultisampleStateCreateInfo ms{};
-    ms.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
     VkPipelineColorBlendAttachmentState cba{};
     cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     VkPipelineColorBlendStateCreateInfo cb{};
-    cb.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    cb.attachmentCount = 1;
-    cb.pAttachments    = &cba;
+    cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    cb.attachmentCount = 1; cb.pAttachments = &cba;
 
-    VkDynamicState dyn_states[] = { VK_DYNAMIC_STATE_VIEWPORT,
-                                    VK_DYNAMIC_STATE_SCISSOR };
+    VkDynamicState dyn_states[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
     VkPipelineDynamicStateCreateInfo dyn{};
-    dyn.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    dyn.dynamicStateCount = 2;
-    dyn.pDynamicStates    = dyn_states;
+    dyn.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dyn.dynamicStateCount = 2; dyn.pDynamicStates = dyn_states;
 
     VkPushConstantRange pc_range{};
     pc_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-    pc_range.offset     = 0;
-    pc_range.size       = sizeof(Mat4);
+    pc_range.offset = 0; pc_range.size = sizeof(dh::vk::Mat4);
 
     VkPipelineLayoutCreateInfo pl{};
-    pl.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pl.pushConstantRangeCount = 1;
-    pl.pPushConstantRanges    = &pc_range;
+    pl.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pl.pushConstantRangeCount = 1; pl.pPushConstantRanges = &pc_range;
     vk_check(vkCreatePipelineLayout(r.device, &pl, nullptr, &r.pipeline_layout),
              "vkCreatePipelineLayout");
 
     VkGraphicsPipelineCreateInfo info{};
-    info.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    info.stageCount          = 2;
-    info.pStages             = stages;
-    info.pVertexInputState   = &vi;
+    info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    info.stageCount = 2; info.pStages = stages;
+    info.pVertexInputState = &vi;
     info.pInputAssemblyState = &ia;
-    info.pViewportState      = &vp;
+    info.pViewportState = &vp;
     info.pRasterizationState = &rast;
-    info.pMultisampleState   = &ms;
-    info.pColorBlendState    = &cb;
-    info.pDynamicState       = &dyn;
-    info.layout              = r.pipeline_layout;
-    info.renderPass          = r.render_pass;
-    info.subpass             = 0;
+    info.pMultisampleState = &ms;
+    info.pColorBlendState = &cb;
+    info.pDynamicState = &dyn;
+    info.layout = r.pipeline_layout;
+    info.renderPass = r.render_pass; info.subpass = 0;
     vk_check(vkCreateGraphicsPipelines(r.device, VK_NULL_HANDLE, 1, &info,
-                                       nullptr, &r.pipeline),
-             "vkCreateGraphicsPipelines");
+                                       nullptr, &r.pipeline), "vkCreateGraphicsPipelines");
 
     vkDestroyShaderModule(r.device, vert, nullptr);
     vkDestroyShaderModule(r.device, frag, nullptr);
@@ -493,7 +425,7 @@ void init_vulkan(Renderer& r, uint64_t seed, uint16_t version,
         std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         std::exit(1);
     }
-    r.window = SDL_CreateWindow("digital-humans | G2b",
+    r.window = SDL_CreateWindow("digital-humans | G3",
                                 kWidth, kHeight,
                                 SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
     if (!r.window) {
@@ -554,19 +486,21 @@ void init_vulkan(Renderer& r, uint64_t seed, uint16_t version,
     create_swapchain(r);
     create_pipeline(r);
     build_terrain_mesh(r, seed, version, origin);
+
+    // Capture the mouse for camera look.
+    SDL_SetWindowRelativeMouseMode(r.window, true);
 }
 
 void init_commands(Renderer& r) {
     VkCommandPoolCreateInfo ci{};
-    ci.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    ci.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    ci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    ci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     ci.queueFamilyIndex = r.graphics_family;
     vk_check(vkCreateCommandPool(r.device, &ci, nullptr, &r.cmd_pool), "pool");
 
     VkCommandBufferAllocateInfo ai{};
-    ai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    ai.commandPool        = r.cmd_pool;
-    ai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.commandPool = r.cmd_pool; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     ai.commandBufferCount = 1;
     vk_check(vkAllocateCommandBuffers(r.device, &ai, &r.cmd), "cmdbuf");
 
@@ -591,24 +525,22 @@ void record_command(Renderer& r, uint32_t image_index) {
     clear.color = {{ 0.05f, 0.07f, 0.10f, 1.0f }};
 
     VkRenderPassBeginInfo rp{};
-    rp.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    rp.renderPass        = r.render_pass;
-    rp.framebuffer       = r.framebuffers[image_index];
+    rp.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rp.renderPass = r.render_pass;
+    rp.framebuffer = r.framebuffers[image_index];
     rp.renderArea.offset = { 0, 0 };
     rp.renderArea.extent = r.extent;
-    rp.clearValueCount   = 1;
-    rp.pClearValues      = &clear;
+    rp.clearValueCount = 1; rp.pClearValues = &clear;
     vkCmdBeginRenderPass(r.cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
     vkCmdBindPipeline(r.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, r.pipeline);
     vkCmdPushConstants(r.cmd, r.pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT,
-                       0, sizeof(Mat4), r.mvp.m);
+                       0, sizeof(dh::vk::Mat4), r.mvp.m);
 
     VkViewport vp{};
-    vp.width    = static_cast<float>(r.extent.width);
-    vp.height   = static_cast<float>(r.extent.height);
-    vp.minDepth = 0.0f;
-    vp.maxDepth = 1.0f;
+    vp.width = static_cast<float>(r.extent.width);
+    vp.height = static_cast<float>(r.extent.height);
+    vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
     vkCmdSetViewport(r.cmd, 0, 1, &vp);
 
     VkRect2D sc{};
@@ -640,29 +572,21 @@ void draw_frame(Renderer& r) {
     VkSemaphore rd = r.render_done_per_image[image_index];
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo submit{};
-    submit.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit.waitSemaphoreCount   = 1;
-    submit.pWaitSemaphores      = &r.image_ready;
-    submit.pWaitDstStageMask    = &wait_stage;
-    submit.commandBufferCount   = 1;
-    submit.pCommandBuffers      = &r.cmd;
-    submit.signalSemaphoreCount = 1;
-    submit.pSignalSemaphores    = &rd;
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.waitSemaphoreCount = 1; submit.pWaitSemaphores = &r.image_ready;
+    submit.pWaitDstStageMask = &wait_stage;
+    submit.commandBufferCount = 1; submit.pCommandBuffers = &r.cmd;
+    submit.signalSemaphoreCount = 1; submit.pSignalSemaphores = &rd;
     vk_check(vkQueueSubmit(r.graphics_q, 1, &submit, r.in_flight), "submit");
 
     VkPresentInfoKHR present{};
-    present.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    present.waitSemaphoreCount = 1;
-    present.pWaitSemaphores    = &rd;
-    present.swapchainCount     = 1;
-    present.pSwapchains        = &r.swapchain;
-    present.pImageIndices      = &image_index;
+    present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    present.waitSemaphoreCount = 1; present.pWaitSemaphores = &rd;
+    present.swapchainCount = 1; present.pSwapchains = &r.swapchain;
+    present.pImageIndices = &image_index;
     VkResult pr = vkQueuePresentKHR(r.present_q, &present);
-    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
-        recreate_swapchain(r);
-    } else if (pr != VK_SUCCESS) {
-        vk_check(pr, "present");
-    }
+    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) recreate_swapchain(r);
+    else if (pr != VK_SUCCESS) vk_check(pr, "present");
 }
 
 void poll_events(Renderer& r) {
@@ -672,8 +596,44 @@ void poll_events(Renderer& r) {
             r.running = false;
         } else if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE) {
             r.running = false;
+        } else if (e.type == SDL_EVENT_MOUSE_MOTION) {
+            r.mouse_accum_x += e.motion.xrel;
+            r.mouse_accum_y += e.motion.yrel;
         }
     }
+}
+
+void update_camera(Renderer& r, float dt) {
+    // Look
+    if (r.mouse_accum_x != 0.0f || r.mouse_accum_y != 0.0f) {
+        r.camera.rotate(r.mouse_accum_x, r.mouse_accum_y);
+        r.mouse_accum_x = 0.0f;
+        r.mouse_accum_y = 0.0f;
+    }
+
+    // Move
+    float forward = 0.0f, right = 0.0f, up = 0.0f;
+    const bool* keys = SDL_GetKeyboardState(nullptr);
+    if (keys[SDL_SCANCODE_W]) forward += 1.0f;
+    if (keys[SDL_SCANCODE_S]) forward -= 1.0f;
+    if (keys[SDL_SCANCODE_D]) right   += 1.0f;
+    if (keys[SDL_SCANCODE_A]) right   -= 1.0f;
+    if (keys[SDL_SCANCODE_E]) up      += 1.0f;
+    if (keys[SDL_SCANCODE_Q]) up      -= 1.0f;
+    if (keys[SDL_SCANCODE_LSHIFT]) r.camera.speed = 900.0f;
+    else                           r.camera.speed = 300.0f;
+
+    if (forward != 0.0f || right != 0.0f || up != 0.0f) {
+        r.camera.move(forward, right, up, dt);
+    }
+
+    // Rebuild MVP
+    const dh::vk::Mat4 view = r.camera.view();
+    const dh::vk::Mat4 proj = dh::vk::perspective_vk(
+        60.0f * 3.14159265f / 180.0f,
+        static_cast<float>(r.extent.width) / static_cast<float>(r.extent.height),
+        1.0f, 20000.0f);
+    r.mvp = dh::vk::mul(proj, view);
 }
 
 void shutdown(Renderer& r) {
@@ -708,22 +668,28 @@ void shutdown(Renderer& r) {
 int main(int, char**) {
     Renderer r;
     try {
-        init_vulkan(r, 42, 1, { -7, -7 });   // 15x15 grid centered on chunk (0,0)
+        init_vulkan(r, 42, 1, { -7, -7 });
         init_commands(r);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "init failed: %s\n", e.what());
         return 1;
     }
 
-    std::printf("G2b: 15x15 terrain grid, lit. seed=42 v=1 origin=(-7,-7). ESC to quit.\n");
+    std::printf("G3: terrain + camera. WASD move, QE up/down, mouse look, "
+                "Shift=fast, ESC=quit.\n");
     std::fflush(stdout);
 
+    Uint64 prev = SDL_GetTicks();
+
     while (r.running) {
-        SDL_Event e;
-        while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_EVENT_QUIT) r.running = false;
-            if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE) r.running = false;
-        }
+        poll_events(r);
+
+        const Uint64 now = SDL_GetTicks();
+        float dt = static_cast<float>(now - prev) / 1000.0f;
+        prev = now;
+        if (dt > 0.1f) dt = 0.1f;   // clamp after a stall
+
+        update_camera(r, dt);
         draw_frame(r);
     }
     shutdown(r);
