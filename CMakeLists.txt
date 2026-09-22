@@ -101,6 +101,50 @@ add_executable(dh_dump src/dump_main.cpp)
 target_link_libraries(dh_dump PRIVATE dh_img_dump)
 dh_set_warnings(dh_dump)
 
+# --- shader loader ---
+add_library(dh_vk_shader STATIC src/vk/shader.cpp)
+target_include_directories(dh_vk_shader PUBLIC include)
+target_link_libraries(dh_vk_shader PUBLIC Vulkan::Vulkan)
+target_include_directories(dh_vk_shader SYSTEM PRIVATE ${Vulkan_INCLUDE_DIRS})
+dh_set_warnings(dh_vk_shader)
+
+# --- shader compilation ---
+set(DH_SHADER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
+set(DH_SHADER_BIN_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders)
+file(MAKE_DIRECTORY ${DH_SHADER_BIN_DIR})
+
+set(DH_SHADER_OUTPUTS
+    ${DH_SHADER_BIN_DIR}/triangle.vert.spv
+    ${DH_SHADER_BIN_DIR}/triangle.frag.spv
+    ${DH_SHADER_BIN_DIR}/terrain.vert.spv
+    ${DH_SHADER_BIN_DIR}/terrain.frag.spv
+)
+
+add_custom_command(
+    OUTPUT ${DH_SHADER_OUTPUTS}
+    COMMAND $<TARGET_FILE:Vulkan::glslc>
+            -o ${DH_SHADER_BIN_DIR}/triangle.vert.spv
+            ${DH_SHADER_SRC_DIR}/triangle.vert
+    COMMAND $<TARGET_FILE:Vulkan::glslc>
+            -o ${DH_SHADER_BIN_DIR}/triangle.frag.spv
+            ${DH_SHADER_SRC_DIR}/triangle.frag
+    COMMAND $<TARGET_FILE:Vulkan::glslc>
+            -o ${DH_SHADER_BIN_DIR}/terrain.vert.spv
+            ${DH_SHADER_SRC_DIR}/terrain.vert
+    COMMAND $<TARGET_FILE:Vulkan::glslc>
+            -o ${DH_SHADER_BIN_DIR}/terrain.frag.spv
+            ${DH_SHADER_SRC_DIR}/terrain.frag
+    DEPENDS
+        ${DH_SHADER_SRC_DIR}/triangle.vert
+        ${DH_SHADER_SRC_DIR}/triangle.frag
+        ${DH_SHADER_SRC_DIR}/terrain.vert
+        ${DH_SHADER_SRC_DIR}/terrain.frag
+    COMMENT "Compiling shaders"
+)
+
+add_custom_target(dh_shaders ALL DEPENDS ${DH_SHADER_OUTPUTS})
+
+
 # --- tests ---
 enable_testing()
 
@@ -145,3 +189,39 @@ target_include_directories(dh_vk SYSTEM PRIVATE
     ${vk-bootstrap_SOURCE_DIR}/src
 )
 dh_set_warnings(dh_vk)
+
+# --- Vulkan G1 triangle ---
+add_executable(dh_vk_triangle src/vk_triangle.cpp)
+target_link_libraries(dh_vk_triangle PRIVATE
+    SDL3::SDL3-static
+    vk-bootstrap::vk-bootstrap
+    Vulkan::Vulkan
+    dh_vk_shader
+)
+target_include_directories(dh_vk_triangle SYSTEM PRIVATE
+    ${vk-bootstrap_SOURCE_DIR}/src
+)
+target_compile_definitions(dh_vk_triangle PRIVATE
+    DH_SHADER_DIR="${DH_SHADER_BIN_DIR}"
+)
+add_dependencies(dh_vk_triangle dh_shaders)
+dh_set_warnings(dh_vk_triangle)
+
+# --- Vulkan G2a terrain ---
+add_executable(dh_vk_terrain src/vk_terrain.cpp)
+target_link_libraries(dh_vk_terrain PRIVATE
+    SDL3::SDL3-static
+    vk-bootstrap::vk-bootstrap
+    Vulkan::Vulkan
+    dh_vk_shader
+    dh_chunk
+    dh_coords
+)
+target_include_directories(dh_vk_terrain SYSTEM PRIVATE
+    ${vk-bootstrap_SOURCE_DIR}/src
+)
+target_compile_definitions(dh_vk_terrain PRIVATE
+    DH_SHADER_DIR="${DH_SHADER_BIN_DIR}"
+)
+add_dependencies(dh_vk_terrain dh_shaders)
+dh_set_warnings(dh_vk_terrain)
