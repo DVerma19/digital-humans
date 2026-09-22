@@ -80,6 +80,17 @@ target_include_directories(dh_chunk_manager PUBLIC include)
 target_link_libraries(dh_chunk_manager PRIVATE dh_chunk)
 dh_set_warnings(dh_chunk_manager)
 
+add_library(dh_hydro STATIC
+    src/hydro.cpp
+)
+target_include_directories(dh_hydro PUBLIC include)
+target_link_libraries(dh_hydro PRIVATE dh_chunk dh_coords)
+dh_set_warnings(dh_hydro)
+
+add_executable(dh_hydro_dump src/hydro_dump_main.cpp)
+target_link_libraries(dh_hydro_dump PRIVATE dh_hydro)
+dh_set_warnings(dh_hydro_dump)
+
 add_library(dh_img_dump STATIC src/img_dump.cpp)
 target_include_directories(dh_img_dump PUBLIC include)
 target_link_libraries(dh_img_dump PRIVATE dh_chunk)
@@ -184,6 +195,11 @@ add_executable(dh_chunk_manager_tests tests/chunk_manager_test.cpp)
 target_link_libraries(dh_chunk_manager_tests PRIVATE dh_chunk_manager Catch2::Catch2WithMain)
 dh_set_warnings(dh_chunk_manager_tests)
 add_test(NAME chunk_manager COMMAND dh_chunk_manager_tests)
+
+add_executable(dh_hydro_tests tests/hydro_test.cpp)
+target_link_libraries(dh_hydro_tests PRIVATE dh_hydro Catch2::Catch2WithMain)
+dh_set_warnings(dh_hydro_tests)
+add_test(NAME hydro COMMAND dh_hydro_tests)
 
 # --- Vulkan apps ---
 add_executable(dh_vk src/vk_main.cpp)
