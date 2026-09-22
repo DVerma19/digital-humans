@@ -1,0 +1,11 @@
+build/
+data/
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+.cache/
+compile_commands.json
+.vscode/
+.idea/
