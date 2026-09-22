@@ -6,9 +6,8 @@ namespace dh::chunk {
 
 namespace {
 
-// Empirical amplitudes. Data, will move to params header later.
-constexpr double ELEV_BASE_AMP   = 400.0;  // meters
-constexpr double ELEV_DETAIL_AMP =  30.0;  // meters
+constexpr double ELEV_BASE_AMP   = 400.0;
+constexpr double ELEV_DETAIL_AMP =  30.0;
 
 inline double world_x(coords::ChunkAddress addr, int32_t lx) {
     return static_cast<double>(addr.x) * coords::CHUNK_SIZE_XZ
@@ -24,7 +23,9 @@ inline double world_z(coords::ChunkAddress addr, int32_t lz) {
 
 Chunk::Chunk()
     : elevation(CELL_COUNT, 0.0f),
-      roughness(CELL_COUNT, 0.0f) {}
+      roughness(CELL_COUNT, 0.0f),
+      river_flow(CELL_COUNT, 0.0f),
+      lake_depth(CELL_COUNT, 0.0f) {}
 
 float elevation_at(coords::ChunkAddress addr, int32_t lx, int32_t lz,
                    uint64_t world_seed, uint16_t generation_version) {
@@ -61,12 +62,6 @@ void generate(Chunk& c, uint64_t world_seed) {
 }
 
 hash::Hash256 hash_of(const Chunk& c) {
-    // Canonical bytes (see DECISIONS.md):
-    //   address.x  int32 LE
-    //   address.z  int32 LE
-    //   gen_ver    uint16 LE
-    //   elevation  f32 LE, CELL_COUNT entries, row-major
-    //   roughness  f32 LE, CELL_COUNT entries, row-major
     constexpr std::size_t N = static_cast<std::size_t>(CELL_COUNT);
     std::vector<uint8_t> buf;
     buf.reserve(4 + 4 + 2 + N * 4 * 2);

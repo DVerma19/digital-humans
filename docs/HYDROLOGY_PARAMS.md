@@ -53,7 +53,7 @@ The path is C -> discovered_by[C] -> discovered_by[discovered_by[C]] -> ... -> o
     outlet cells (ocean and grid boundary) have direction = DIR_NONE.
     is_lake[cell]        = filled_elev[cell] > original_elev[cell] + epsilon
     lake_depth[cell]     = filled_elev[cell] - original_elev[cell]
-    
+
 ## Accumulation
 
     accum[cell] starts at 1.
@@ -73,6 +73,25 @@ The path is C -> discovered_by[C] -> discovered_by[discovered_by[C]] -> ... -> o
     One incoming, or many with equal max order < 2: order = max.
     Two or more incoming of same max order: order = max + 1.
     Capped at 12.
+
+
+## Pass 2 refinement (per chunk)
+
+Local D8 flow on a 1-cell halo elevation grid. Interior cells only.
+
+    RIVER_MIN_ACCUM   = 4.0   (below this, no river)
+    RIVER_FULL_ACCUM  = 40.0  (above this, river is fully saturated)
+    LAKE_EPSILON      = 0.05  (meters)
+
+Per-cell output:
+
+    river_flow   = clamp((local_accum - RIVER_MIN_ACCUM)
+                       / (RIVER_FULL_ACCUM - RIVER_MIN_ACCUM), 0, 1)
+    lake_depth   = filled_elevation - elevation  if basin cell is a lake
+                 = 0 otherwise
+    Both are 0 in ocean cells.
+
+Out-of-world chunks (address outside BASIN grid): all water = 0.
 
 ## Open questions
 
