@@ -25,7 +25,9 @@ Chunk::Chunk()
     : elevation(CELL_COUNT, 0.0f),
       roughness(CELL_COUNT, 0.0f),
       river_flow(CELL_COUNT, 0.0f),
-      lake_depth(CELL_COUNT, 0.0f) {}
+      lake_depth(CELL_COUNT, 0.0f),
+      biome_id(CELL_COUNT, 0),
+      fertility(CELL_COUNT, 0.0f) {}
 
 float elevation_at(coords::ChunkAddress addr, int32_t lx, int32_t lz,
                    uint64_t world_seed, uint16_t generation_version) {

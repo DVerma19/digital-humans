@@ -84,10 +84,14 @@ add_library(dh_hydro STATIC
     src/hydro.cpp
     src/hydro_chunk.cpp
 )
-
 target_include_directories(dh_hydro PUBLIC include)
-target_link_libraries(dh_hydro PRIVATE dh_chunk dh_coords)
+target_link_libraries(dh_hydro PRIVATE dh_chunk dh_coords dh_noise)
 dh_set_warnings(dh_hydro)
+
+add_library(dh_biome STATIC src/biome.cpp)
+target_include_directories(dh_biome PUBLIC include)
+target_link_libraries(dh_biome PRIVATE dh_chunk dh_noise dh_coords)
+dh_set_warnings(dh_biome)
 
 add_executable(dh_hydro_dump src/hydro_dump_main.cpp)
 target_link_libraries(dh_hydro_dump PRIVATE dh_hydro)
@@ -124,17 +128,27 @@ target_link_libraries(dh_vk_buffer PUBLIC Vulkan::Vulkan)
 target_include_directories(dh_vk_buffer SYSTEM PRIVATE ${Vulkan_INCLUDE_DIRS})
 dh_set_warnings(dh_vk_buffer)
 
+add_library(dh_vk_thread_pool STATIC src/vk/thread_pool.cpp)
+target_include_directories(dh_vk_thread_pool PUBLIC include)
+dh_set_warnings(dh_vk_thread_pool)
+
+add_library(dh_vk_frustum STATIC src/vk/frustum.cpp)
+target_include_directories(dh_vk_frustum PUBLIC include)
+target_link_libraries(dh_vk_frustum PUBLIC dh_vk_math)
+dh_set_warnings(dh_vk_frustum)
+
 add_library(dh_vk_render_chunk STATIC src/vk/render_chunk.cpp)
 target_include_directories(dh_vk_render_chunk PUBLIC include)
 target_link_libraries(dh_vk_render_chunk PUBLIC
-    Vulkan::Vulkan dh_vk_buffer dh_chunk dh_coords dh_hydro)
+    Vulkan::Vulkan dh_vk_buffer dh_chunk dh_coords dh_hydro dh_biome)
 target_include_directories(dh_vk_render_chunk SYSTEM PRIVATE ${Vulkan_INCLUDE_DIRS})
 dh_set_warnings(dh_vk_render_chunk)
 
 add_library(dh_vk_streamer STATIC src/vk/chunk_streamer.cpp)
 target_include_directories(dh_vk_streamer PUBLIC include)
 target_link_libraries(dh_vk_streamer PUBLIC
-    Vulkan::Vulkan dh_vk_render_chunk dh_coords dh_hydro)
+    Vulkan::Vulkan dh_vk_render_chunk dh_vk_thread_pool
+    dh_coords dh_hydro dh_biome)
 target_include_directories(dh_vk_streamer SYSTEM PRIVATE ${Vulkan_INCLUDE_DIRS})
 dh_set_warnings(dh_vk_streamer)
 
@@ -208,6 +222,11 @@ target_link_libraries(dh_hydro_chunk_tests PRIVATE dh_hydro Catch2::Catch2WithMa
 dh_set_warnings(dh_hydro_chunk_tests)
 add_test(NAME hydro_chunk COMMAND dh_hydro_chunk_tests)
 
+add_executable(dh_biome_tests tests/biome_test.cpp)
+target_link_libraries(dh_biome_tests PRIVATE dh_biome dh_hydro Catch2::Catch2WithMain)
+dh_set_warnings(dh_biome_tests)
+add_test(NAME biome COMMAND dh_biome_tests)
+
 # --- Vulkan apps ---
 add_executable(dh_vk src/vk_main.cpp)
 target_link_libraries(dh_vk PRIVATE SDL3::SDL3-static vk-bootstrap::vk-bootstrap Vulkan::Vulkan)
@@ -231,11 +250,14 @@ target_link_libraries(dh_vk_terrain PRIVATE
     dh_vk_math
     dh_vk_camera
     dh_vk_buffer
+    dh_vk_thread_pool
+    dh_vk_frustum
     dh_vk_render_chunk
     dh_vk_streamer
     dh_chunk
     dh_coords
     dh_hydro
+    dh_biome
 )
 target_include_directories(dh_vk_terrain SYSTEM PRIVATE ${vk-bootstrap_SOURCE_DIR}/src)
 target_compile_definitions(dh_vk_terrain PRIVATE DH_SHADER_DIR="${DH_SHADER_BIN_DIR}")

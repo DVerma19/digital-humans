@@ -19,11 +19,12 @@
 
 namespace {
 
-constexpr int kWidth  = 1280;
-constexpr int kHeight = 720;
+constexpr int kWidth  = 1920;
+constexpr int kHeight = 1080;
 
-constexpr int32_t kStreamRadius = 6;
-constexpr int     kBuildsPerFrame = 2;
+constexpr int32_t kStreamRadius = 8;
+constexpr int     kBuildsPerFrame = 3;
+constexpr uint32_t kWorkerThreads = 6;
 
 #ifndef DH_SHADER_DIR
 #define DH_SHADER_DIR "shaders"
@@ -62,6 +63,8 @@ struct Renderer {
     dh::vk::Mat4                  mvp;
     dh::vk::ChunkStreamer*        streamer = nullptr;
     dh::hydro::BasinGrid*         basin    = nullptr;
+    uint64_t                      seed_    = 0;
+    uint16_t                      version_ = 0;
 
     float mouse_accum_x = 0.0f;
     float mouse_accum_y = 0.0f;
@@ -198,10 +201,10 @@ void create_pipeline(Renderer& r) {
 
     VkVertexInputBindingDescription bind{};
     bind.binding   = 0;
-    bind.stride    = 8 * sizeof(float);
+    bind.stride    = 9 * sizeof(float);
     bind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription attrs[4]{};
+    VkVertexInputAttributeDescription attrs[5]{};
     attrs[0].location = 0; attrs[0].binding = 0;
     attrs[0].format = VK_FORMAT_R32G32B32_SFLOAT; attrs[0].offset = 0;
     attrs[1].location = 1; attrs[1].binding = 0;
@@ -213,12 +216,15 @@ void create_pipeline(Renderer& r) {
     attrs[3].location = 3; attrs[3].binding = 0;
     attrs[3].format = VK_FORMAT_R32_SFLOAT;
     attrs[3].offset = 7 * sizeof(float);
+    attrs[4].location = 4; attrs[4].binding = 0;
+    attrs[4].format = VK_FORMAT_R32_SFLOAT;
+    attrs[4].offset = 8 * sizeof(float);
 
     VkPipelineVertexInputStateCreateInfo vi{};
     vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vi.vertexBindingDescriptionCount   = 1;
     vi.pVertexBindingDescriptions      = &bind;
-    vi.vertexAttributeDescriptionCount = 4;
+    vi.vertexAttributeDescriptionCount = 5;
     vi.pVertexAttributeDescriptions    = attrs;
 
     VkPipelineInputAssemblyStateCreateInfo ia{};
@@ -286,6 +292,9 @@ void create_pipeline(Renderer& r) {
 }
 
 void init_vulkan(Renderer& r, uint64_t seed, uint16_t version) {
+    r.seed_ = seed;
+    r.version_ = version;
+
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
         std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         std::exit(1);
@@ -357,14 +366,18 @@ void init_vulkan(Renderer& r, uint64_t seed, uint16_t version) {
     std::fprintf(stderr, "basin grid ready.\n");
 
     r.streamer = new dh::vk::ChunkStreamer(r.device, r.physical, seed, version,
-                                           kStreamRadius, r.basin);
+                                           kStreamRadius, r.basin,
+                                           kWorkerThreads);
 
     // Initial camera: standing on the terrain at chunk (0,0) center.
-    const float cam_y = dh::chunk::elevation_at({0, 0}, 32, 32, seed, version) + 30.0f;
-    r.camera.x = 32.0f;
-    r.camera.y = cam_y;
-    r.camera.z = 32.0f + 100.0f;
-    r.camera.look_at_world(32.0f, cam_y - 15.0f, 32.0f);
+    // Spawn over a known land chunk, higher up, looking down more.
+    const float ground = dh::chunk::elevation_at({20, 20}, 32, 32, seed, version);
+    const float spawn_x = 20.0f * 64.0f + 32.0f;
+    const float spawn_z = 20.0f * 64.0f + 32.0f;
+    r.camera.x = spawn_x;
+    r.camera.y = ground + 150.0f;
+    r.camera.z = spawn_z;
+    r.camera.look_at_world(spawn_x, ground, spawn_z - 1.0f);  // look mostly downward
 
     SDL_SetWindowRelativeMouseMode(r.window, true);
 }
@@ -506,6 +519,20 @@ void update_camera(Renderer& r, float dt) {
         r.camera.move(forward, right, up, dt);
     }
 
+    // Keep the camera above the terrain.
+    dh::coords::WorldPos cam{r.camera.x, r.camera.y, r.camera.z};
+    const auto caddr = dh::coords::world_to_chunk(cam);
+    const auto lcoord = dh::coords::world_to_local(cam);
+    const float terrain_y = dh::chunk::elevation_at(
+        caddr,
+        static_cast<int32_t>(lcoord.x),
+        static_cast<int32_t>(lcoord.z),
+        r.seed_, r.version_);
+    constexpr float kMinClearance = 3.0f;
+    if (r.camera.y < terrain_y + kMinClearance) {
+        r.camera.y = terrain_y + kMinClearance;
+    }
+
     const dh::vk::Mat4 view = r.camera.view();
     const dh::vk::Mat4 proj = dh::vk::perspective_vk(
         60.0f * 3.14159265f / 180.0f,
@@ -546,6 +573,7 @@ void shutdown(Renderer& r) {
 int main(int, char**) {
     Renderer r;
     try {
+
         init_vulkan(r, 42, 1);
         init_commands(r);
     } catch (const std::exception& e) {
@@ -554,6 +582,8 @@ int main(int, char**) {
     }
 
     std::printf("G4: streaming terrain. WASD, QE, mouse, Shift=fast, ESC=quit.\n");
+    std::printf("     threads=%u radius=%d\n",
+                kWorkerThreads, kStreamRadius);
     std::fflush(stdout);
 
     Uint64 prev = SDL_GetTicks();
