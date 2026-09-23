@@ -9,6 +9,7 @@
 #include "dh/vk/chunk_streamer.hpp"
 #include "dh/chunk.hpp"
 #include "dh/hydro.hpp"
+#include "dh/vk/frustum.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -65,6 +66,7 @@ struct Renderer {
     dh::hydro::BasinGrid*         basin    = nullptr;
     uint64_t                      seed_    = 0;
     uint16_t                      version_ = 0;
+    dh::vk::Frustum               frustum;
 
     float mouse_accum_x = 0.0f;
     float mouse_accum_y = 0.0f;
@@ -439,13 +441,32 @@ void record_command(Renderer& r, uint32_t image_index) {
     vkCmdSetScissor(r.cmd, 0, 1, &sc);
 
     VkDeviceSize offset = 0;
+    int drawn = 0, culled = 0;
     for (const auto& kv : r.streamer->chunks()) {
         const dh::vk::RenderChunk& rc = kv.second;
         if (rc.index.count == 0) continue;
+
+        // Chunk AABB in world coordinates.
+        const float bx = static_cast<float>(kv.first.x) * 64.0f;
+        const float bz = static_cast<float>(kv.first.z) * 64.0f;
+
+        // Height range: conservative. Use a wide band so we never cull
+        // anything visible. Tightening this needs per-chunk min/max height.
+        constexpr float kMinY = -500.0f;
+        constexpr float kMaxY =  2500.0f;
+
+        if (!r.frustum.contains_aabb(bx, kMinY, bz,
+                                     bx + 64.0f, kMaxY, bz + 64.0f)) {
+            ++culled;
+            continue;
+        }
+
         vkCmdBindVertexBuffers(r.cmd, 0, 1, &rc.vertex.handle, &offset);
         vkCmdBindIndexBuffer(r.cmd, rc.index.handle, 0, VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexed(r.cmd, rc.index.count, 1, 0, 0, 0);
+        ++drawn;
     }
+    (void)drawn; (void)culled;
 
     vkCmdEndRenderPass(r.cmd);
     vk_check(vkEndCommandBuffer(r.cmd), "end");
@@ -539,6 +560,7 @@ void update_camera(Renderer& r, float dt) {
         static_cast<float>(r.extent.width) / static_cast<float>(r.extent.height),
         1.0f, 20000.0f);
     r.mvp = dh::vk::mul(proj, view);
+    r.frustum = dh::vk::extract_frustum(r.mvp);
 }
 
 void shutdown(Renderer& r) {
